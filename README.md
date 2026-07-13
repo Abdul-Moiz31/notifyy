@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <strong>Status:</strong> Phase 1, subphase 1c complete (API routes) · subphase 1d (worker sending) not started yet
+  <strong>Status:</strong> Phase 1, subphase 1d complete (worker: claim jobs, send email via Nodemailer, record deliveries, retry with backoff) · subphase 1e (dashboard) not started yet
 </p>
 
 ---
@@ -49,12 +49,12 @@
 ```
 apps/
   api/            Fastify backend — /health plus /v1/events (create, get, list), API-key auth
-  worker/         background job processor — logs startup and stays alive so far, sending lands in subphase 1d
+  worker/         polls jobs, sends email via Nodemailer/SMTP, records deliveries, retries with backoff
   dashboard/      Next.js frontend (default App Router scaffold)
 packages/
   db/             Drizzle schema, migrations, DB client, seed script
-  shared/         Zod schemas, status enums, API key hashing — reused by apps/api now, apps/worker in 1d
-  queue/          Postgres-backed queue abstraction (scaffolded, not populated yet)
+  shared/         Zod schemas, status enums, API key hashing — reused by apps/api and apps/worker
+  queue/          Postgres-backed queue abstraction (`PgQueue`: enqueue, claimNext) — the only thing that touches `jobs` directly
 docs/
   phase-1/
     design.md               target architecture for phase 1
@@ -108,7 +108,7 @@ The seed script creates one test tenant and one API key, and prints the **raw** 
 
 ```bash
 pnpm dev:api        # Fastify on http://localhost:3000, GET /health
-pnpm dev:worker      # logs "worker started" and stays alive
+pnpm dev:worker     # polls jobs and sends email via SMTP
 pnpm dev:dashboard  # Next.js default page
 ```
 
@@ -138,7 +138,9 @@ curl -s -X POST http://localhost:3000/v1/events \
 }
 ```
 
-A matching `jobs` row (`status: "queued"`) is created in the same transaction. Repeating the same `idempotency_key` for the same tenant returns **409 Conflict** and creates nothing new. An invalid or revoked API key returns **401**.
+A matching `jobs` row (`status: "queued"`) is created in the same transaction via `packages/queue`. Repeating the same `idempotency_key` for the same tenant returns **409 Conflict** and creates nothing new. An invalid or revoked API key returns **401**.
+
+For the worker to actually deliver the event, `payload` must include `to` (a valid email), `subject`, and `body` — the worker validates this shape (`emailNotificationPayloadSchema` in `packages/shared`) before sending. A payload missing any of these fails validation and the event goes straight to `dead_letter` without retrying.
 
 ### `GET /v1/events/:id` — fetch one event, scoped to the caller's tenant
 
@@ -146,7 +148,7 @@ A matching `jobs` row (`status: "queued"`) is created in the same transaction. R
 curl -s http://localhost:3000/v1/events/$EVENT_ID -H "Authorization: Bearer $API_KEY"
 ```
 
-Returns the event plus its `deliveries` array (empty until subphase 1d sends anything). An id that doesn't exist — or that belongs to a different tenant — returns **404** in both cases, so tenant existence is never leaked.
+Returns the event plus its `deliveries` array — populated once the worker has attempted (or completed) delivery. An id that doesn't exist — or that belongs to a different tenant — returns **404** in both cases, so tenant existence is never leaked.
 
 ### `GET /v1/events` — paginated list, most recent first
 
@@ -181,6 +183,7 @@ Run from the repo root unless noted:
 | `pnpm format` / `pnpm format:check` | Prettier write / check across the repo |
 | `pnpm dev:api` / `dev:worker` / `dev:dashboard` | Run one app in dev mode |
 | `pnpm --filter @notify-engine/api run test` | Vitest integration tests for `/v1/events` (hits the real DB, see [Environment variables](#environment-variables)) |
+| `pnpm --filter @notify-engine/worker run test` | Vitest integration tests for the worker — hits the real DB and sends a real email over SMTP |
 | `pnpm --filter @notify-engine/db run generate` | Generate a new Drizzle migration from schema changes |
 | `pnpm --filter @notify-engine/db run migrate` | Apply migrations to `DATABASE_URL` |
 | `pnpm --filter @notify-engine/db run seed` | Create a test tenant + API key |
@@ -189,7 +192,7 @@ Run from the repo root unless noted:
 
 - [`docs/phase-1/design.md`](docs/phase-1/design.md) — components, data model, request flow.
 - [`docs/phase-1/architecture-diagram.md`](docs/phase-1/architecture-diagram.md) — mermaid diagram.
-- [`docs/phase-1/decisions.md`](docs/phase-1/decisions.md) — ADR log, currently covering: Postgres-backed queue over a broker, idempotency via a unique constraint enforced as a 409, layered service architecture, tenant scoping at the schema level, Nodemailer over Resend, `tenant_id` column over schema-per-tenant, and Postgres `jobs` table over Redis.
+- [`docs/phase-1/decisions.md`](docs/phase-1/decisions.md) — ADR log, currently covering: Postgres-backed queue over a broker, idempotency via a unique constraint enforced as a 409, layered service architecture, tenant scoping at the schema level, Nodemailer over Resend, `tenant_id` column over schema-per-tenant, Postgres `jobs` table over Redis, and exponential backoff retry capped at 5 attempts with a non-retryable path for invalid payloads.
 
 ## Roadmap
 
@@ -197,8 +200,8 @@ Phase 1 subphases, updated as work lands:
 
 - [x] **1a** — monorepo scaffold, tooling (TypeScript, ESLint, Prettier), runnable empty `api`/`worker`/`dashboard`
 - [x] **1b** — core schema in `packages/db`
-- [x] **1c** — API routes: auth by API key, `POST /v1/events`, `GET /v1/events`, `GET /v1/events/:id`, idempotency-as-409 (this README's current state)
-- [ ] **1d** — worker: claim jobs, send email via Nodemailer, record deliveries
+- [x] **1c** — API routes: auth by API key, `POST /v1/events`, `GET /v1/events`, `GET /v1/events/:id`, idempotency-as-409
+- [x] **1d** — worker: claim jobs, send email via Nodemailer, record deliveries, retry with backoff and dead-letter on exhaustion (this README's current state)
 - [ ] **1e** — dashboard: view API keys and notification history
 
 > This README is kept up to date as each subphase lands — check the Roadmap above for current status.

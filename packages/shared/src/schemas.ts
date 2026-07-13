@@ -28,3 +28,12 @@ export const listEventsQuerySchema = z.object({
 });
 
 export type ListEventsQuery = z.infer<typeof listEventsQuerySchema>;
+
+/** Shape the worker requires inside `notification_events.payload` to send an email (phase 1: single email channel, no templates). */
+export const emailNotificationPayloadSchema = z.object({
+  to: z.string().email(),
+  subject: z.string().min(1),
+  body: z.string().min(1),
+});
+
+export type EmailNotificationPayload = z.infer<typeof emailNotificationPayloadSchema>;

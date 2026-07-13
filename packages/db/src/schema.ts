@@ -9,6 +9,7 @@ import {
   uniqueIndex,
   index,
 } from "drizzle-orm/pg-core";
+import type { InferSelectModel } from "drizzle-orm";
 
 export const notificationEventStatusEnum = pgEnum("notification_event_status", [
   "pending",
@@ -117,3 +118,7 @@ export const jobs = pgTable(
     index("jobs_event_id_idx").on(table.eventId),
   ],
 );
+
+export type Job = InferSelectModel<typeof jobs>;
+export type NotificationEvent = InferSelectModel<typeof notificationEvents>;
+export type Delivery = InferSelectModel<typeof deliveries>;

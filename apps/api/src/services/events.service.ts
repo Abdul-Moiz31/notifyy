@@ -1,5 +1,6 @@
 import { and, eq, desc, sql } from "drizzle-orm";
-import { db, notificationEvents, deliveries, jobs } from "@notify-engine/db";
+import { db, notificationEvents, deliveries } from "@notify-engine/db";
+import { queue } from "@notify-engine/queue";
 import type { CreateNotificationEventInput, ListEventsQuery } from "@notify-engine/shared";
 
 export class IdempotencyConflictError extends Error {}
@@ -40,11 +41,7 @@ export async function createEvent(tenantId: string, input: CreateNotificationEve
       throw new Error("Failed to create notification event");
     }
 
-    await tx.insert(jobs).values({
-      eventId: created.id,
-      tenantId,
-      status: "queued",
-    });
+    await queue.enqueue({ eventId: created.id, tenantId }, tx);
 
     return created;
   });
