@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <strong>Status:</strong> Phase 1, subphase 1d complete (worker: claim jobs, send email via Nodemailer, record deliveries, retry with backoff) · subphase 1e (dashboard) not started yet
+  <strong>Status:</strong> Phase 1, subphase 1e complete (dashboard: sign up via Supabase Auth, view/regenerate API key, browse notification events with delivery detail)
 </p>
 
 ---
@@ -48,9 +48,9 @@
 
 ```
 apps/
-  api/            Fastify backend — /health plus /v1/events (create, get, list), API-key auth
+  api/            Fastify backend — /health, /v1/events* (API-key auth), /v1/dashboard/* (Supabase-session auth)
   worker/         polls jobs, sends email via Nodemailer/SMTP, records deliveries, retries with backoff
-  dashboard/      Next.js frontend (default App Router scaffold)
+  dashboard/      Next.js app — sign up/login (Supabase Auth), API key, notification event log
 packages/
   db/             Drizzle schema, migrations, DB client, seed script
   shared/         Zod schemas, status enums, API key hashing — reused by apps/api and apps/worker
@@ -72,8 +72,8 @@ load-tests/
 
 Defined in `packages/db/src/schema.ts`, migrated via Drizzle:
 
-- **`tenants`** — one row per developer/organization.
-- **`api_keys`** — `key_hash` only (the raw key is never stored), scoped to a tenant, indexed for fast lookup, `revoked_at` for revocation.
+- **`tenants`** — one row per developer/organization; `auth_user_id` links a tenant to the Supabase Auth user who owns it in the dashboard (nullable — the seed script's tenant has none).
+- **`api_keys`** — `key_hash` only (the raw key is never stored), scoped to a tenant, indexed for fast lookup, `revoked_at` for revocation. `last_four` (non-secret) powers the dashboard's masked display.
 - **`notification_events`** — one row per triggered event; `UNIQUE (tenant_id, idempotency_key)` rejects duplicate retries at the database level. `status`: `pending → processing → sent | failed | dead_letter`.
 - **`deliveries`** — one row per delivery attempt on a channel (`email` for now) for an event; tracks `provider_message_id`, `attempt_count`, `error_message`.
 - **`jobs`** — the phase 1 queue. `status`: `queued → locked → done | failed`, with `locked_by`/`locked_at` and `run_after` for backoff. Indexed on `(status, run_after)` since the worker polls this constantly.
@@ -107,10 +107,14 @@ The seed script creates one test tenant and one API key, and prints the **raw** 
 ### Run the apps
 
 ```bash
-pnpm dev:api        # Fastify on http://localhost:3000, GET /health
+pnpm dev:api        # Fastify on http://localhost:3000
 pnpm dev:worker     # polls jobs and sends email via SMTP
-pnpm dev:dashboard  # Next.js default page
+pnpm dev:dashboard  # Next.js — runs on :3000 by default; if apps/api already holds :3000,
+                    # run it on another port (e.g. `pnpm --filter @notify-engine/dashboard exec next dev -p 3001`)
+                    # and update DASHBOARD_ORIGIN / NEXT_PUBLIC_API_URL to match.
 ```
+
+Open the dashboard, sign up with an email/password (Supabase Auth) — you're dropped straight onto `/dashboard` with a freshly issued API key shown once. From there, `/dashboard/events` shows every event triggered on that key, with delivery attempts on expand.
 
 ## API
 
@@ -160,6 +164,17 @@ curl -s "http://localhost:3000/v1/events?limit=20&offset=0" -H "Authorization: B
 { "events": [ /* ... */ ], "total": 1, "limit": 20, "offset": 0 }
 ```
 
+### `/v1/dashboard/*` — the dashboard's own routes
+
+Authenticated by `Authorization: Bearer <supabase-access-token>` instead of an API key (`plugins/supabase-auth.ts`, verified against Supabase's `/auth/v1/user` REST endpoint). CORS is enabled only for this prefix, allowlisted via `DASHBOARD_ORIGIN`.
+
+| Route | Notes |
+|---|---|
+| `POST /v1/dashboard/signup` | Idempotent: creates a tenant + first API key for this Supabase user if none exists yet; the raw key is only ever present in this response (first call) or a regenerate call — never again after. |
+| `GET /v1/dashboard/me` | Tenant + masked API key metadata (`ntfy_••••••••ab12`, `createdAt`, `lastUsedAt`). 404 if signup hasn't run yet for this account. |
+| `POST /v1/dashboard/api-key/regenerate` | Revokes the active key, mints a new one, returns the new raw key once. |
+| `GET /v1/dashboard/events` / `GET /v1/dashboard/events/:id` | Same pagination/404 semantics as `/v1/events*`, scoped to the session's tenant instead of a header-supplied key. |
+
 ## Environment variables
 
 See `.env.example` for the full list. Key ones:
@@ -169,7 +184,14 @@ See `.env.example` for the full list. Key ones:
 | `DATABASE_URL` | Use Supabase's **connection pooler** string (`aws-*.pooler.supabase.com`), not the direct `db.*.supabase.co` host — the direct host is IPv6-only and unreachable from many networks. |
 | `SMTP_HOST` / `SMTP_PORT` / `SMTP_SECURE` / `SMTP_USER` / `SMTP_PASS` | Any SMTP provider works — Gmail (with an App Password) or a free tier like Brevo (300/day). |
 | `NOTIFY_FROM_EMAIL` | The `From` address the worker sends as. |
-| `NEXT_PUBLIC_SUPABASE_URL` / `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Dashboard auth, from Supabase → Project Settings → API. |
+| `NEXT_PUBLIC_SUPABASE_URL` / `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Dashboard's own Supabase client, from Supabase → Project Settings → API. |
+| `SUPABASE_URL` / `SUPABASE_ANON_KEY` | Same Supabase project, read server-side by `apps/api` to verify dashboard session tokens. |
+| `NEXT_PUBLIC_API_URL` | Base URL of `apps/api`, called directly from the dashboard's browser code. |
+| `DASHBOARD_ORIGIN` | Comma-separated CORS allowlist for `/v1/dashboard/*` — the dashboard's own origin(s). |
+
+The dashboard reads its env vars from the monorepo-root `.env` (loaded via `dotenv` in `apps/dashboard/next.config.ts`), not a dashboard-local `.env.local`.
+
+**Note:** this project's Supabase Auth currently has "Confirm email" disabled, so signup returns a usable session immediately — the dashboard's signup page still handles the confirmation-required case (Supabase Dashboard → Authentication → Providers → Email) if it's re-enabled before production.
 
 ## Scripts
 
@@ -179,10 +201,10 @@ Run from the repo root unless noted:
 |---|---|
 | `pnpm install` | Install all workspace dependencies |
 | `pnpm typecheck` | `tsc --noEmit` across every app/package |
-| `pnpm lint` | ESLint across `apps/api`, `apps/worker`, `packages/*`, plus `next lint` for the dashboard |
+| `pnpm lint` | ESLint across `apps/api`, `apps/worker`, `packages/*`, plus the dashboard's own ESLint config |
 | `pnpm format` / `pnpm format:check` | Prettier write / check across the repo |
 | `pnpm dev:api` / `dev:worker` / `dev:dashboard` | Run one app in dev mode |
-| `pnpm --filter @notify-engine/api run test` | Vitest integration tests for `/v1/events` (hits the real DB, see [Environment variables](#environment-variables)) |
+| `pnpm --filter @notify-engine/api run test` | Vitest integration tests for `/v1/events*` and `/v1/dashboard/*` (hits the real DB and Supabase Auth, see [Environment variables](#environment-variables)) |
 | `pnpm --filter @notify-engine/worker run test` | Vitest integration tests for the worker — hits the real DB and sends a real email over SMTP |
 | `pnpm --filter @notify-engine/db run generate` | Generate a new Drizzle migration from schema changes |
 | `pnpm --filter @notify-engine/db run migrate` | Apply migrations to `DATABASE_URL` |
@@ -192,7 +214,7 @@ Run from the repo root unless noted:
 
 - [`docs/phase-1/design.md`](docs/phase-1/design.md) — components, data model, request flow.
 - [`docs/phase-1/architecture-diagram.md`](docs/phase-1/architecture-diagram.md) — mermaid diagram.
-- [`docs/phase-1/decisions.md`](docs/phase-1/decisions.md) — ADR log, currently covering: Postgres-backed queue over a broker, idempotency via a unique constraint enforced as a 409, layered service architecture, tenant scoping at the schema level, Nodemailer over Resend, `tenant_id` column over schema-per-tenant, Postgres `jobs` table over Redis, and exponential backoff retry capped at 5 attempts with a non-retryable path for invalid payloads.
+- [`docs/phase-1/decisions.md`](docs/phase-1/decisions.md) — ADR log, currently covering: Postgres-backed queue over a broker, idempotency via a unique constraint enforced as a 409, layered service architecture, tenant scoping at the schema level, Nodemailer over Resend, `tenant_id` column over schema-per-tenant, Postgres `jobs` table over Redis, exponential backoff retry capped at 5 attempts with a non-retryable path for invalid payloads, tenant↔Supabase Auth linking via `auth_user_id` with a parallel dashboard auth scope, API keys shown in full only once, and CORS scoped only to `/v1/dashboard/*`.
 
 ## Roadmap
 
@@ -201,7 +223,7 @@ Phase 1 subphases, updated as work lands:
 - [x] **1a** — monorepo scaffold, tooling (TypeScript, ESLint, Prettier), runnable empty `api`/`worker`/`dashboard`
 - [x] **1b** — core schema in `packages/db`
 - [x] **1c** — API routes: auth by API key, `POST /v1/events`, `GET /v1/events`, `GET /v1/events/:id`, idempotency-as-409
-- [x] **1d** — worker: claim jobs, send email via Nodemailer, record deliveries, retry with backoff and dead-letter on exhaustion (this README's current state)
-- [ ] **1e** — dashboard: view API keys and notification history
+- [x] **1d** — worker: claim jobs, send email via Nodemailer, record deliveries, retry with backoff and dead-letter on exhaustion
+- [x] **1e** — dashboard: sign up/login via Supabase Auth, view + regenerate API key, browse notification events with delivery detail (this README's current state)
 
 > This README is kept up to date as each subphase lands — check the Roadmap above for current status.

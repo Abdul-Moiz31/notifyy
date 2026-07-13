@@ -25,11 +25,16 @@ export const deliveryStatusEnum = pgEnum("delivery_status", ["pending", "sent", 
 
 export const jobStatusEnum = pgEnum("job_status", ["queued", "locked", "done", "failed"]);
 
-export const tenants = pgTable("tenants", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  name: text("name").notNull(),
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-});
+export const tenants = pgTable(
+  "tenants",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    authUserId: uuid("auth_user_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [uniqueIndex("tenants_auth_user_id_idx").on(table.authUserId)],
+);
 
 export const apiKeys = pgTable(
   "api_keys",
@@ -39,6 +44,7 @@ export const apiKeys = pgTable(
       .notNull()
       .references(() => tenants.id, { onDelete: "cascade" }),
     keyHash: text("key_hash").notNull(),
+    lastFour: text("last_four"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
@@ -122,3 +128,5 @@ export const jobs = pgTable(
 export type Job = InferSelectModel<typeof jobs>;
 export type NotificationEvent = InferSelectModel<typeof notificationEvents>;
 export type Delivery = InferSelectModel<typeof deliveries>;
+export type Tenant = InferSelectModel<typeof tenants>;
+export type ApiKey = InferSelectModel<typeof apiKeys>;

@@ -29,6 +29,13 @@ export const listEventsQuerySchema = z.object({
 
 export type ListEventsQuery = z.infer<typeof listEventsQuerySchema>;
 
+/** Body for POST /v1/dashboard/signup — tenant display name, defaulting to the account email if omitted. */
+export const dashboardSignupSchema = z.object({
+  name: z.string().min(1).max(255).optional(),
+});
+
+export type DashboardSignupInput = z.infer<typeof dashboardSignupSchema>;
+
 /** Shape the worker requires inside `notification_events.payload` to send an email (phase 1: single email channel, no templates). */
 export const emailNotificationPayloadSchema = z.object({
   to: z.string().email(),

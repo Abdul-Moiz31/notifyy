@@ -8,3 +8,7 @@ export function generateApiKey(): string {
 export function hashApiKey(rawKey: string): string {
   return createHash("sha256").update(rawKey).digest("hex");
 }
+
+export function getApiKeyLastFour(rawKey: string): string {
+  return rawKey.slice(-4);
+}
