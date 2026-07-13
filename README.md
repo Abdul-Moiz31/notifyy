@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <strong>Status:</strong> Phase 1, subphase 1b complete (schema) · subphase 1c (API routes) not started yet
+  <strong>Status:</strong> Phase 1, subphase 1c complete (API routes) · subphase 1d (worker sending) not started yet
 </p>
 
 ---
@@ -18,6 +18,7 @@
 - [Project structure](#project-structure)
 - [Data model](#data-model)
 - [Getting started](#getting-started)
+- [API](#api)
 - [Environment variables](#environment-variables)
 - [Scripts](#scripts)
 - [Architecture & decisions](#architecture--decisions)
@@ -47,12 +48,12 @@
 
 ```
 apps/
-  api/            Fastify backend — GET /health only so far, routes land in subphase 1c
-  worker/         background job processor — logs startup and stays alive so far
+  api/            Fastify backend — /health plus /v1/events (create, get, list), API-key auth
+  worker/         background job processor — logs startup and stays alive so far, sending lands in subphase 1d
   dashboard/      Next.js frontend (default App Router scaffold)
 packages/
   db/             Drizzle schema, migrations, DB client, seed script
-  shared/         shared types, Zod schemas, constants (scaffolded, not populated yet)
+  shared/         Zod schemas, status enums, API key hashing — reused by apps/api now, apps/worker in 1d
   queue/          Postgres-backed queue abstraction (scaffolded, not populated yet)
 docs/
   phase-1/
@@ -111,6 +112,52 @@ pnpm dev:worker      # logs "worker started" and stays alive
 pnpm dev:dashboard  # Next.js default page
 ```
 
+## API
+
+All `/v1/events*` routes require `Authorization: Bearer <api-key>` (the raw key printed once by the seed script). `/health` is unauthenticated.
+
+### `POST /v1/events` — create a notification event
+
+```bash
+curl -s -X POST http://localhost:3000/v1/events \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"idempotency_key":"demo-key-001","event_type":"user.signup","payload":{"email":"demo@example.com"}}'
+```
+
+```json
+{
+  "id": "ad85f5b5-c396-4436-9ca4-617f13dc38d4",
+  "tenantId": "0b81aada-6f31-40c6-afdf-10ce06798d66",
+  "idempotencyKey": "demo-key-001",
+  "eventType": "user.signup",
+  "payload": { "email": "demo@example.com" },
+  "status": "pending",
+  "createdAt": "2026-07-13T13:01:00.041Z",
+  "updatedAt": "2026-07-13T13:01:00.041Z"
+}
+```
+
+A matching `jobs` row (`status: "queued"`) is created in the same transaction. Repeating the same `idempotency_key` for the same tenant returns **409 Conflict** and creates nothing new. An invalid or revoked API key returns **401**.
+
+### `GET /v1/events/:id` — fetch one event, scoped to the caller's tenant
+
+```bash
+curl -s http://localhost:3000/v1/events/$EVENT_ID -H "Authorization: Bearer $API_KEY"
+```
+
+Returns the event plus its `deliveries` array (empty until subphase 1d sends anything). An id that doesn't exist — or that belongs to a different tenant — returns **404** in both cases, so tenant existence is never leaked.
+
+### `GET /v1/events` — paginated list, most recent first
+
+```bash
+curl -s "http://localhost:3000/v1/events?limit=20&offset=0" -H "Authorization: Bearer $API_KEY"
+```
+
+```json
+{ "events": [ /* ... */ ], "total": 1, "limit": 20, "offset": 0 }
+```
+
 ## Environment variables
 
 See `.env.example` for the full list. Key ones:
@@ -133,6 +180,7 @@ Run from the repo root unless noted:
 | `pnpm lint` | ESLint across `apps/api`, `apps/worker`, `packages/*`, plus `next lint` for the dashboard |
 | `pnpm format` / `pnpm format:check` | Prettier write / check across the repo |
 | `pnpm dev:api` / `dev:worker` / `dev:dashboard` | Run one app in dev mode |
+| `pnpm --filter @notify-engine/api run test` | Vitest integration tests for `/v1/events` (hits the real DB, see [Environment variables](#environment-variables)) |
 | `pnpm --filter @notify-engine/db run generate` | Generate a new Drizzle migration from schema changes |
 | `pnpm --filter @notify-engine/db run migrate` | Apply migrations to `DATABASE_URL` |
 | `pnpm --filter @notify-engine/db run seed` | Create a test tenant + API key |
@@ -141,15 +189,15 @@ Run from the repo root unless noted:
 
 - [`docs/phase-1/design.md`](docs/phase-1/design.md) — components, data model, request flow.
 - [`docs/phase-1/architecture-diagram.md`](docs/phase-1/architecture-diagram.md) — mermaid diagram.
-- [`docs/phase-1/decisions.md`](docs/phase-1/decisions.md) — ADR log, currently covering: Postgres-backed queue over a broker, idempotency via a unique constraint, layered service architecture, tenant scoping at the schema level, Nodemailer over Resend, `tenant_id` column over schema-per-tenant, and Postgres `jobs` table over Redis.
+- [`docs/phase-1/decisions.md`](docs/phase-1/decisions.md) — ADR log, currently covering: Postgres-backed queue over a broker, idempotency via a unique constraint enforced as a 409, layered service architecture, tenant scoping at the schema level, Nodemailer over Resend, `tenant_id` column over schema-per-tenant, and Postgres `jobs` table over Redis.
 
 ## Roadmap
 
 Phase 1 subphases, updated as work lands:
 
 - [x] **1a** — monorepo scaffold, tooling (TypeScript, ESLint, Prettier), runnable empty `api`/`worker`/`dashboard`
-- [x] **1b** — core schema in `packages/db` (this README's current state)
-- [ ] **1c** — API routes: auth by API key, `POST /v1/notification-events`, idempotency handling
+- [x] **1b** — core schema in `packages/db`
+- [x] **1c** — API routes: auth by API key, `POST /v1/events`, `GET /v1/events`, `GET /v1/events/:id`, idempotency-as-409 (this README's current state)
 - [ ] **1d** — worker: claim jobs, send email via Nodemailer, record deliveries
 - [ ] **1e** — dashboard: view API keys and notification history
 

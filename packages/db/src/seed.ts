@@ -1,16 +1,8 @@
 import "./env.js";
-import { randomBytes, createHash } from "node:crypto";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
+import { generateApiKey, hashApiKey } from "@notify-engine/shared";
 import { tenants, apiKeys } from "./schema.js";
-
-function generateApiKey(): string {
-  return `ntfy_${randomBytes(32).toString("base64url")}`;
-}
-
-function hashApiKey(rawKey: string): string {
-  return createHash("sha256").update(rawKey).digest("hex");
-}
 
 async function seed(): Promise<void> {
   const connectionString = process.env["DATABASE_URL"];

@@ -25,11 +25,12 @@ Every table carries `tenant_id` (including `jobs` and `deliveries`, which also c
 
 ## Request flow
 
-1. Client calls `POST /v1/notification-events` with `x-api-key` and `idempotency-key` headers and a JSON body (`eventType`, `recipient.email`, `payload`).
-2. Auth middleware resolves the API key to a `tenantId` via `api_keys.key_hash` or rejects with 401.
-3. The route validates the body and delegates to a notification-events service.
-4. The service checks for an existing event with the same `(tenantId, idempotencyKey)`. If found, it returns the existing result (200) instead of creating a duplicate. Otherwise it inserts the event and enqueues a `jobs` row (201).
-5. The worker polls `jobs` (`status = 'queued' AND run_after <= now()`), claims a batch with `FOR UPDATE SKIP LOCKED`, sends the email through Nodemailer, records a `deliveries` row, and marks the job `done` or `failed`.
+1. Client calls `POST /v1/events` with an `Authorization: Bearer <api-key>` header and a JSON body (`idempotency_key`, `event_type`, `payload`).
+2. `plugins/api-key-auth.ts` hashes the key, resolves it to a `tenantId` via `api_keys.key_hash` (rejecting revoked keys), and stamps `request.tenantId` — or rejects with 401. It also updates `last_used_at`. This hook is scoped only to `/v1/events*`, not `/health`.
+3. The route validates the body with a Zod schema from `packages/shared` and delegates to `services/events.service.ts`.
+4. The service inserts the event and a `jobs` row (`status = 'queued'`) in one transaction. If `(tenantId, idempotencyKey)` already exists, the unique constraint fires; the service catches the Postgres unique-violation and the route returns **409 Conflict** — no duplicate event or job is created. A successful create returns **201** with the event.
+5. `GET /v1/events/:id` and `GET /v1/events` (paginated, most recent first) are scoped to `request.tenantId` in every query — a valid id belonging to another tenant returns 404, identical to a nonexistent id, so tenant existence is never leaked.
+6. (Subphase 1d) The worker will poll `jobs` (`status = 'queued' AND run_after <= now()`), claim a batch with `FOR UPDATE SKIP LOCKED`, send the email through Nodemailer, record a `deliveries` row, and mark the job `done` or `failed`.
 
 ## Out of scope for phase 1
 

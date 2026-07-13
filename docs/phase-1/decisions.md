@@ -6,11 +6,11 @@
 **Decision:** Use a `jobs` table in the same Postgres database, claimed via `SELECT ... FOR UPDATE SKIP LOCKED`, wrapped in a `PgQueue` class in `packages/queue`.
 **Consequences:** No extra infrastructure to run or pay for in phase 1. The abstraction is isolated behind `PgQueue` so a later phase can swap in Redis/SQS/etc. without changing callers, at the cost of lower throughput ceiling than a dedicated queue.
 
-## ADR-002: Idempotency via a unique `(tenant_id, idempotency_key)` constraint
+## ADR-002: Idempotency via a unique `(tenant_id, idempotency_key)` constraint, enforced as a 409
 
-**Context:** Clients may retry `POST /v1/notification-events` on network failure, and retries must not double-send.
-**Decision:** Require an `idempotency-key` header on every notification-triggering request; enforce uniqueness per tenant at the database level and return the original result on a repeat.
-**Consequences:** Retried requests are safe. Clients must generate and persist their own idempotency keys; the API does not synthesize one.
+**Context:** Clients may retry `POST /v1/events` on network failure, and retries must not double-send.
+**Decision:** Require `idempotency_key` in the body of every event-creation request; enforce uniqueness per tenant at the database level. `services/events.service.ts` catches the resulting unique-violation and the route returns **409 Conflict** rather than silently replaying the original 201 — the caller finds out explicitly that this key was already used instead of getting an ambiguous 200/201.
+**Consequences:** Retried requests never create a duplicate event or job. Clients must generate and persist their own idempotency keys; the API does not synthesize one. A client that wants the original event's data back after a 409 needs to look it up separately (e.g. `GET /v1/events` filtered client-side), which is a small extra step traded for an unambiguous status code.
 
 ## ADR-003: Layered architecture in apps/api and apps/worker
 
