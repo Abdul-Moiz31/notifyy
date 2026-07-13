@@ -1,0 +1,31 @@
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.api
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATABASE_URL: ${DATABASE_URL}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+
+  worker:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.worker
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: ${DATABASE_URL}
+      SMTP_HOST: ${SMTP_HOST}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_SECURE: ${SMTP_SECURE:-false}
+      SMTP_USER: ${SMTP_USER}
+      SMTP_PASS: ${SMTP_PASS}
+      NOTIFY_FROM_EMAIL: ${NOTIFY_FROM_EMAIL}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      WORKER_POLL_INTERVAL_MS: ${WORKER_POLL_INTERVAL_MS:-2000}
+      WORKER_BATCH_SIZE: ${WORKER_BATCH_SIZE:-10}

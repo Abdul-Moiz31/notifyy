@@ -1,0 +1,21 @@
+<svg width="480" height="140" viewBox="0 0 480 140" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="mark" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#6366F1"/>
+      <stop offset="100%" stop-color="#22D3EE"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="480" height="140" rx="20" fill="#0F172A"/>
+
+  <rect x="20" y="14" width="112" height="112" rx="26" fill="url(#mark)"/>
+  <path
+    d="M76 40c-13.3 0-24 10.7-24 24v14.5L44 90h64l-8-11.5V64c0-13.3-10.7-24-24-24z"
+    fill="none" stroke="#FFFFFF" stroke-width="6" stroke-linejoin="round" stroke-linecap="round"
+  />
+  <path d="M66 96a10 10 0 0 0 20 0" fill="none" stroke="#FFFFFF" stroke-width="6" stroke-linecap="round"/>
+  <circle cx="102" cy="38" r="9" fill="#FACC15"/>
+
+  <text x="164" y="65" font-family="Helvetica, Arial, sans-serif" font-size="34" font-weight="700" fill="#FFFFFF">Notify</text>
+  <text x="164" y="100" font-family="Helvetica, Arial, sans-serif" font-size="34" font-weight="700" fill="#FFFFFF">Engine</text>
+</svg>

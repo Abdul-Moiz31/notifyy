@@ -1,0 +1,23 @@
+{
+  "name": "@notify-engine/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/main.js",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "nodemailer": "^6.9.16",
+    "pino": "^9.5.0",
+    "pino-pretty": "^13.0.0"
+  },
+  "devDependencies": {
+    "@types/nodemailer": "^6.4.16",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}
