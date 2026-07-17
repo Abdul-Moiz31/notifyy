@@ -1,25 +1,22 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { randomUUID } from "node:crypto";
 import { inArray } from "drizzle-orm";
-import type { FastifyInstance } from "fastify";
+import type { Hono } from "hono";
 import { db, client, tenants } from "@notify-engine/db";
 import { buildApp } from "../src/app.js";
+import { testEnv } from "./test-env.js";
+import type { AppEnv } from "../src/types.js";
 
-const supabaseUrl = process.env["SUPABASE_URL"];
-const supabaseAnonKey = process.env["SUPABASE_ANON_KEY"];
-
-if (!supabaseUrl || !supabaseAnonKey) {
-  throw new Error("SUPABASE_URL and SUPABASE_ANON_KEY environment variables are required for this test");
-}
+const env = testEnv();
 
 async function signUpNewUser() {
   const email = `notifyengine.test.${Date.now()}.${randomUUID()}@gmail.com`;
-  const response = await fetch(`${supabaseUrl}/auth/v1/signup`, {
+  const response = await fetch(`${env.SUPABASE_URL}/auth/v1/signup`, {
     method: "POST",
-    headers: { apikey: supabaseAnonKey ?? "", "Content-Type": "application/json" },
+    headers: { apikey: env.SUPABASE_ANON_KEY, "Content-Type": "application/json" },
     body: JSON.stringify({ email, password: "TestPassword123!" }),
   });
-  const body = (await response.json()) as { access_token?: string; user?: { id: string } };
+  const body = (await response.json<any>()) as { access_token?: string; user?: { id: string } };
 
   if (!response.ok || !body.access_token || !body.user) {
     throw new Error(
@@ -31,12 +28,11 @@ async function signUpNewUser() {
 }
 
 describe("/v1/dashboard integration", () => {
-  let app: FastifyInstance;
+  let app: Hono<AppEnv>;
   const createdTenantIds: string[] = [];
 
-  beforeAll(async () => {
+  beforeAll(() => {
     app = buildApp();
-    await app.ready();
   });
 
   afterAll(async () => {
@@ -44,77 +40,82 @@ describe("/v1/dashboard integration", () => {
       await db.delete(tenants).where(inArray(tenants.id, createdTenantIds));
     }
 
-    await app.close();
     await client.end();
   });
 
   it("rejects requests with no session token", async () => {
-    const response = await app.inject({ method: "GET", url: "/v1/dashboard/me" });
-    expect(response.statusCode).toBe(401);
-  });
-
-  it("allows cross-origin requests from the configured dashboard origin", async () => {
-    const response = await app.inject({
-      method: "OPTIONS",
-      url: "/v1/dashboard/me",
-      headers: {
-        origin: "http://localhost:3001",
-        "access-control-request-method": "GET",
-      },
-    });
-
-    expect(response.headers["access-control-allow-origin"]).toBe("http://localhost:3001");
-  });
-
-  it("does not reflect an arbitrary, non-allowlisted origin", async () => {
-    const response = await app.inject({
-      method: "OPTIONS",
-      url: "/v1/dashboard/me",
-      headers: {
-        origin: "http://evil.example.com",
-        "access-control-request-method": "GET",
-      },
-    });
-
-    expect(response.headers["access-control-allow-origin"]).not.toBe("http://evil.example.com");
+    const response = await app.request("/v1/dashboard/me", {}, env);
+    expect(response.status).toBe(401);
   });
 
   it("rejects requests with a garbage session token", async () => {
-    const response = await app.inject({
-      method: "GET",
-      url: "/v1/dashboard/me",
-      headers: { authorization: "Bearer not-a-real-token" },
-    });
-    expect(response.statusCode).toBe(401);
+    const response = await app.request(
+      "/v1/dashboard/me",
+      { headers: { authorization: "Bearer not-a-real-token" } },
+      env,
+    );
+    expect(response.status).toBe(401);
+  });
+
+  it("allows cross-origin requests from the configured dashboard origin", async () => {
+    const response = await app.request(
+      "/v1/dashboard/me",
+      {
+        method: "OPTIONS",
+        headers: { origin: env.DASHBOARD_ORIGIN, "access-control-request-method": "GET" },
+      },
+      env,
+    );
+
+    expect(response.headers.get("access-control-allow-origin")).toBe(env.DASHBOARD_ORIGIN);
+  });
+
+  it("does not reflect an arbitrary, non-allowlisted origin", async () => {
+    const response = await app.request(
+      "/v1/dashboard/me",
+      {
+        method: "OPTIONS",
+        headers: { origin: "http://evil.example.com", "access-control-request-method": "GET" },
+      },
+      env,
+    );
+
+    expect(response.headers.get("access-control-allow-origin")).not.toBe("http://evil.example.com");
   });
 
   it("signup creates a tenant and returns a raw API key once, then is idempotent on repeat calls", async () => {
     const { accessToken } = await signUpNewUser();
 
-    const first = await app.inject({
-      method: "POST",
-      url: "/v1/dashboard/signup",
-      headers: { authorization: `Bearer ${accessToken}` },
-      payload: { name: "Test Co" },
-    });
+    const first = await app.request(
+      "/v1/dashboard/signup",
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${accessToken}`, "content-type": "application/json" },
+        body: JSON.stringify({ name: "Test Co" }),
+      },
+      env,
+    );
 
-    expect(first.statusCode).toBe(200);
-    const firstBody = first.json();
+    expect(first.status).toBe(200);
+    const firstBody = await first.json<any>();
     expect(firstBody.tenant.id).toBeDefined();
     expect(typeof firstBody.apiKey).toBe("string");
     expect(firstBody.apiKey.startsWith("ntfy_")).toBe(true);
 
     createdTenantIds.push(firstBody.tenant.id);
 
-    const second = await app.inject({
-      method: "POST",
-      url: "/v1/dashboard/signup",
-      headers: { authorization: `Bearer ${accessToken}` },
-      payload: { name: "Test Co" },
-    });
+    const second = await app.request(
+      "/v1/dashboard/signup",
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${accessToken}`, "content-type": "application/json" },
+        body: JSON.stringify({ name: "Test Co" }),
+      },
+      env,
+    );
 
-    expect(second.statusCode).toBe(200);
-    const secondBody = second.json();
+    expect(second.status).toBe(200);
+    const secondBody = await second.json<any>();
     expect(secondBody.tenant.id).toBe(firstBody.tenant.id);
     expect(secondBody.apiKey).toBeNull();
   });
@@ -122,156 +123,189 @@ describe("/v1/dashboard integration", () => {
   it("me returns the tenant and masked key metadata after signup", async () => {
     const { accessToken } = await signUpNewUser();
 
-    const signup = await app.inject({
-      method: "POST",
-      url: "/v1/dashboard/signup",
-      headers: { authorization: `Bearer ${accessToken}` },
-      payload: {},
-    });
-    createdTenantIds.push(signup.json().tenant.id);
+    const signup = await app.request(
+      "/v1/dashboard/signup",
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${accessToken}`, "content-type": "application/json" },
+        body: JSON.stringify({}),
+      },
+      env,
+    );
+    const signupBody = await signup.json<any>();
+    createdTenantIds.push(signupBody.tenant.id);
 
-    const response = await app.inject({
-      method: "GET",
-      url: "/v1/dashboard/me",
-      headers: { authorization: `Bearer ${accessToken}` },
-    });
+    const response = await app.request(
+      "/v1/dashboard/me",
+      { headers: { authorization: `Bearer ${accessToken}` } },
+      env,
+    );
 
-    expect(response.statusCode).toBe(200);
-    const body = response.json();
-    expect(body.tenant.id).toBe(signup.json().tenant.id);
+    expect(response.status).toBe(200);
+    const body = await response.json<any>();
+    expect(body.tenant.id).toBe(signupBody.tenant.id);
     expect(body.apiKey.masked).toMatch(/^ntfy_.*[0-9a-zA-Z_-]{4}$/);
-    expect(body.apiKey.masked).not.toBe(signup.json().apiKey);
+    expect(body.apiKey.masked).not.toBe(signupBody.apiKey);
   });
 
   it("me returns 404 before signup has ever run for this account", async () => {
     const { accessToken } = await signUpNewUser();
 
-    const response = await app.inject({
-      method: "GET",
-      url: "/v1/dashboard/me",
-      headers: { authorization: `Bearer ${accessToken}` },
-    });
+    const response = await app.request(
+      "/v1/dashboard/me",
+      { headers: { authorization: `Bearer ${accessToken}` } },
+      env,
+    );
 
-    expect(response.statusCode).toBe(404);
+    expect(response.status).toBe(404);
   });
 
   it("regenerating the API key revokes the old one and returns a new raw key", async () => {
     const { accessToken } = await signUpNewUser();
 
-    const signup = await app.inject({
-      method: "POST",
-      url: "/v1/dashboard/signup",
-      headers: { authorization: `Bearer ${accessToken}` },
-      payload: {},
-    });
-    createdTenantIds.push(signup.json().tenant.id);
-    const originalKey = signup.json().apiKey;
+    const signup = await app.request(
+      "/v1/dashboard/signup",
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${accessToken}`, "content-type": "application/json" },
+        body: JSON.stringify({}),
+      },
+      env,
+    );
+    const signupBody = await signup.json<any>();
+    createdTenantIds.push(signupBody.tenant.id);
+    const originalKey = signupBody.apiKey;
 
-    const regenerate = await app.inject({
-      method: "POST",
-      url: "/v1/dashboard/api-key/regenerate",
-      headers: { authorization: `Bearer ${accessToken}` },
-    });
+    const regenerate = await app.request(
+      "/v1/dashboard/api-key/regenerate",
+      { method: "POST", headers: { authorization: `Bearer ${accessToken}` } },
+      env,
+    );
 
-    expect(regenerate.statusCode).toBe(200);
-    const newKey = regenerate.json().apiKey;
+    expect(regenerate.status).toBe(200);
+    const newKey = (await regenerate.json<any>()).apiKey;
     expect(newKey).not.toBe(originalKey);
 
-    const usingOldKey = await app.inject({
-      method: "POST",
-      url: "/v1/events",
-      headers: { authorization: `Bearer ${originalKey}` },
-      payload: { idempotency_key: `test-${randomUUID()}`, event_type: "user.signup", payload: {} },
-    });
-    expect(usingOldKey.statusCode).toBe(401);
+    const usingOldKey = await app.request(
+      "/v1/events",
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${originalKey}`, "content-type": "application/json" },
+        body: JSON.stringify({ idempotency_key: `test-${randomUUID()}`, event_type: "user.signup", payload: {} }),
+      },
+      env,
+    );
+    expect(usingOldKey.status).toBe(401);
 
-    const usingNewKey = await app.inject({
-      method: "POST",
-      url: "/v1/events",
-      headers: { authorization: `Bearer ${newKey}` },
-      payload: { idempotency_key: `test-${randomUUID()}`, event_type: "user.signup", payload: {} },
-    });
-    expect(usingNewKey.statusCode).toBe(201);
+    const usingNewKey = await app.request(
+      "/v1/events",
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${newKey}`, "content-type": "application/json" },
+        body: JSON.stringify({ idempotency_key: `test-${randomUUID()}`, event_type: "user.signup", payload: {} }),
+      },
+      env,
+    );
+    expect(usingNewKey.status).toBe(201);
   });
 
   it("dashboard events endpoints reflect events created via the tenant's own API key", async () => {
     const { accessToken } = await signUpNewUser();
 
-    const signup = await app.inject({
-      method: "POST",
-      url: "/v1/dashboard/signup",
-      headers: { authorization: `Bearer ${accessToken}` },
-      payload: {},
-    });
-    createdTenantIds.push(signup.json().tenant.id);
-    const rawKey = signup.json().apiKey;
-
-    const created = await app.inject({
-      method: "POST",
-      url: "/v1/events",
-      headers: { authorization: `Bearer ${rawKey}` },
-      payload: {
-        idempotency_key: `test-${randomUUID()}`,
-        event_type: "user.signup",
-        payload: { to: "user@example.com", subject: "hi", body: "hi" },
+    const signup = await app.request(
+      "/v1/dashboard/signup",
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${accessToken}`, "content-type": "application/json" },
+        body: JSON.stringify({}),
       },
-    });
-    expect(created.statusCode).toBe(201);
-    const eventId = created.json().id;
+      env,
+    );
+    const signupBody = await signup.json<any>();
+    createdTenantIds.push(signupBody.tenant.id);
+    const rawKey = signupBody.apiKey;
 
-    const list = await app.inject({
-      method: "GET",
-      url: "/v1/dashboard/events",
-      headers: { authorization: `Bearer ${accessToken}` },
-    });
-    expect(list.statusCode).toBe(200);
-    const listBody = list.json();
+    const created = await app.request(
+      "/v1/events",
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${rawKey}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          idempotency_key: `test-${randomUUID()}`,
+          event_type: "user.signup",
+          payload: { to: "user@example.com", subject: "hi", body: "hi" },
+        }),
+      },
+      env,
+    );
+    expect(created.status).toBe(201);
+    const eventId = (await created.json<any>()).id;
+
+    const list = await app.request(
+      "/v1/dashboard/events",
+      { headers: { authorization: `Bearer ${accessToken}` } },
+      env,
+    );
+    expect(list.status).toBe(200);
+    const listBody = await list.json<any>();
     expect(listBody.events.some((event: { id: string }) => event.id === eventId)).toBe(true);
 
-    const detail = await app.inject({
-      method: "GET",
-      url: `/v1/dashboard/events/${eventId}`,
-      headers: { authorization: `Bearer ${accessToken}` },
-    });
-    expect(detail.statusCode).toBe(200);
-    expect(detail.json().id).toBe(eventId);
-    expect(Array.isArray(detail.json().deliveries)).toBe(true);
+    const detail = await app.request(
+      `/v1/dashboard/events/${eventId}`,
+      { headers: { authorization: `Bearer ${accessToken}` } },
+      env,
+    );
+    expect(detail.status).toBe(200);
+    const detailBody = await detail.json<any>();
+    expect(detailBody.id).toBe(eventId);
+    expect(Array.isArray(detailBody.deliveries)).toBe(true);
   });
 
   it("another tenant's dashboard session cannot see this tenant's event", async () => {
     const owner = await signUpNewUser();
     const outsider = await signUpNewUser();
 
-    const ownerSignup = await app.inject({
-      method: "POST",
-      url: "/v1/dashboard/signup",
-      headers: { authorization: `Bearer ${owner.accessToken}` },
-      payload: {},
-    });
-    createdTenantIds.push(ownerSignup.json().tenant.id);
+    const ownerSignup = await app.request(
+      "/v1/dashboard/signup",
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${owner.accessToken}`, "content-type": "application/json" },
+        body: JSON.stringify({}),
+      },
+      env,
+    );
+    const ownerSignupBody = await ownerSignup.json<any>();
+    createdTenantIds.push(ownerSignupBody.tenant.id);
 
-    const outsiderSignup = await app.inject({
-      method: "POST",
-      url: "/v1/dashboard/signup",
-      headers: { authorization: `Bearer ${outsider.accessToken}` },
-      payload: {},
-    });
-    createdTenantIds.push(outsiderSignup.json().tenant.id);
+    const outsiderSignup = await app.request(
+      "/v1/dashboard/signup",
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${outsider.accessToken}`, "content-type": "application/json" },
+        body: JSON.stringify({}),
+      },
+      env,
+    );
+    const outsiderSignupBody = await outsiderSignup.json<any>();
+    createdTenantIds.push(outsiderSignupBody.tenant.id);
 
-    const created = await app.inject({
-      method: "POST",
-      url: "/v1/events",
-      headers: { authorization: `Bearer ${ownerSignup.json().apiKey}` },
-      payload: { idempotency_key: `test-${randomUUID()}`, event_type: "user.signup", payload: {} },
-    });
-    const eventId = created.json().id;
+    const created = await app.request(
+      "/v1/events",
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${ownerSignupBody.apiKey}`, "content-type": "application/json" },
+        body: JSON.stringify({ idempotency_key: `test-${randomUUID()}`, event_type: "user.signup", payload: {} }),
+      },
+      env,
+    );
+    const eventId = (await created.json<any>()).id;
 
-    const response = await app.inject({
-      method: "GET",
-      url: `/v1/dashboard/events/${eventId}`,
-      headers: { authorization: `Bearer ${outsider.accessToken}` },
-    });
+    const response = await app.request(
+      `/v1/dashboard/events/${eventId}`,
+      { headers: { authorization: `Bearer ${outsider.accessToken}` } },
+      env,
+    );
 
-    expect(response.statusCode).toBe(404);
+    expect(response.status).toBe(404);
   });
 });

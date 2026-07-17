@@ -1,53 +1,57 @@
-import type { FastifyInstance } from "fastify";
+import { Hono } from "hono";
 import { z } from "zod";
 import { createNotificationEventSchema, listEventsQuerySchema } from "@notify-engine/shared";
 import { createEvent, getEventById, listEvents, IdempotencyConflictError } from "../services/events.service.js";
+import type { AppEnv } from "../types.js";
 
 const eventIdParamsSchema = z.object({ id: z.string().uuid() });
 
-export default async function eventsRoutes(app: FastifyInstance) {
-  app.post("/v1/events", async (request, reply) => {
-    const parsed = createNotificationEventSchema.safeParse(request.body);
+const eventsRoutes = new Hono<AppEnv>();
 
-    if (!parsed.success) {
-      return reply.code(400).send({ error: "Invalid request body", details: parsed.error.flatten() });
+eventsRoutes.post("/v1/events", async (c) => {
+  const body = await c.req.json().catch(() => undefined);
+  const parsed = createNotificationEventSchema.safeParse(body);
+
+  if (!parsed.success) {
+    return c.json({ error: "Invalid request body", details: parsed.error.flatten() }, 400);
+  }
+
+  try {
+    const event = await createEvent(c.get("db"), c.get("tenantId"), parsed.data);
+    return c.json(event, 201);
+  } catch (error) {
+    if (error instanceof IdempotencyConflictError) {
+      return c.json({ error: error.message }, 409);
     }
+    throw error;
+  }
+});
 
-    try {
-      const event = await createEvent(request.tenantId, parsed.data);
-      return reply.code(201).send(event);
-    } catch (error) {
-      if (error instanceof IdempotencyConflictError) {
-        return reply.code(409).send({ error: error.message });
-      }
-      throw error;
-    }
-  });
+eventsRoutes.get("/v1/events/:id", async (c) => {
+  const parsedParams = eventIdParamsSchema.safeParse({ id: c.req.param("id") });
 
-  app.get("/v1/events/:id", async (request, reply) => {
-    const parsedParams = eventIdParamsSchema.safeParse(request.params);
+  if (!parsedParams.success) {
+    return c.json({ error: "Event not found" }, 404);
+  }
 
-    if (!parsedParams.success) {
-      return reply.code(404).send({ error: "Event not found" });
-    }
+  const result = await getEventById(c.get("db"), c.get("tenantId"), parsedParams.data.id);
 
-    const result = await getEventById(request.tenantId, parsedParams.data.id);
+  if (!result) {
+    return c.json({ error: "Event not found" }, 404);
+  }
 
-    if (!result) {
-      return reply.code(404).send({ error: "Event not found" });
-    }
+  return c.json(result);
+});
 
-    return reply.send(result);
-  });
+eventsRoutes.get("/v1/events", async (c) => {
+  const parsedQuery = listEventsQuerySchema.safeParse(c.req.query());
 
-  app.get("/v1/events", async (request, reply) => {
-    const parsedQuery = listEventsQuerySchema.safeParse(request.query);
+  if (!parsedQuery.success) {
+    return c.json({ error: "Invalid query", details: parsedQuery.error.flatten() }, 400);
+  }
 
-    if (!parsedQuery.success) {
-      return reply.code(400).send({ error: "Invalid query", details: parsedQuery.error.flatten() });
-    }
+  const result = await listEvents(c.get("db"), c.get("tenantId"), parsedQuery.data);
+  return c.json(result);
+});
 
-    const result = await listEvents(request.tenantId, parsedQuery.data);
-    return reply.send(result);
-  });
-}
+export default eventsRoutes;

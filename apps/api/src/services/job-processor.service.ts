@@ -1,8 +1,9 @@
 import { eq } from "drizzle-orm";
-import { db, notificationEvents, deliveries, jobs, type Job } from "@notify-engine/db";
+import type { Database } from "@notify-engine/db/hyperdrive";
+import { notificationEvents, deliveries, jobs, type Job } from "@notify-engine/db/schema";
 import { emailNotificationPayloadSchema } from "@notify-engine/shared";
 import type { Transporter } from "nodemailer";
-import type { Logger } from "pino";
+import type { Logger } from "../logger.js";
 import { sendEmail } from "./mailer.service.js";
 
 export const MAX_ATTEMPTS = 5;
@@ -13,6 +14,7 @@ export function computeBackoffMs(attemptCount: number): number {
 }
 
 export interface ProcessJobDeps {
+  db: Database;
   transporter: Transporter;
   fromAddress: string;
   logger: Logger;
@@ -24,7 +26,12 @@ interface DeliveryOutcome {
   errorMessage: string | null;
 }
 
-async function recordDelivery(eventId: string, tenantId: string, outcome: DeliveryOutcome): Promise<void> {
+async function recordDelivery(
+  db: Database,
+  eventId: string,
+  tenantId: string,
+  outcome: DeliveryOutcome,
+): Promise<void> {
   const [existing] = await db.select().from(deliveries).where(eq(deliveries.eventId, eventId)).limit(1);
 
   if (existing) {
@@ -54,6 +61,7 @@ async function recordDelivery(eventId: string, tenantId: string, outcome: Delive
 }
 
 export async function processJob(job: Job, deps: ProcessJobDeps): Promise<void> {
+  const { db } = deps;
   const log = deps.logger.child({ event_id: job.eventId, tenant_id: job.tenantId, job_id: job.id });
 
   const [event] = await db
@@ -76,7 +84,7 @@ export async function processJob(job: Job, deps: ProcessJobDeps): Promise<void> 
   if (!parsedPayload.success) {
     const errorMessage = `Invalid email payload: ${parsedPayload.error.message}`;
     log.error({ err: errorMessage }, "job failed permanently: payload does not match email schema");
-    await recordDelivery(event.id, job.tenantId, {
+    await recordDelivery(db, event.id, job.tenantId, {
       status: "failed",
       providerMessageId: null,
       errorMessage,
@@ -92,7 +100,7 @@ export async function processJob(job: Job, deps: ProcessJobDeps): Promise<void> 
   try {
     const result = await sendEmail(deps.transporter, deps.fromAddress, parsedPayload.data);
 
-    await recordDelivery(event.id, job.tenantId, {
+    await recordDelivery(db, event.id, job.tenantId, {
       status: "sent",
       providerMessageId: result.providerMessageId,
       errorMessage: null,
@@ -108,7 +116,7 @@ export async function processJob(job: Job, deps: ProcessJobDeps): Promise<void> 
     const errorMessage = error instanceof Error ? error.message : String(error);
     const newAttemptCount = job.attemptCount + 1;
 
-    await recordDelivery(event.id, job.tenantId, {
+    await recordDelivery(db, event.id, job.tenantId, {
       status: "failed",
       providerMessageId: null,
       errorMessage,

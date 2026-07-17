@@ -1,6 +1,7 @@
 import { and, eq, desc, sql } from "drizzle-orm";
-import { db, notificationEvents, deliveries } from "@notify-engine/db";
-import { queue } from "@notify-engine/queue";
+import type { Database } from "@notify-engine/db/hyperdrive";
+import { notificationEvents, deliveries } from "@notify-engine/db/schema";
+import { PgQueue } from "@notify-engine/queue";
 import type { CreateNotificationEventInput, ListEventsQuery } from "@notify-engine/shared";
 
 export class IdempotencyConflictError extends Error {}
@@ -14,7 +15,7 @@ function isUniqueViolation(error: unknown): boolean {
   );
 }
 
-export async function createEvent(tenantId: string, input: CreateNotificationEventInput) {
+export async function createEvent(db: Database, tenantId: string, input: CreateNotificationEventInput) {
   return db.transaction(async (tx) => {
     let created;
 
@@ -41,13 +42,13 @@ export async function createEvent(tenantId: string, input: CreateNotificationEve
       throw new Error("Failed to create notification event");
     }
 
-    await queue.enqueue({ eventId: created.id, tenantId }, tx);
+    await new PgQueue(db).enqueue({ eventId: created.id, tenantId }, tx);
 
     return created;
   });
 }
 
-export async function getEventById(tenantId: string, eventId: string) {
+export async function getEventById(db: Database, tenantId: string, eventId: string) {
   const [event] = await db
     .select()
     .from(notificationEvents)
@@ -66,7 +67,7 @@ export async function getEventById(tenantId: string, eventId: string) {
   return { ...event, deliveries: eventDeliveries };
 }
 
-export async function listEvents(tenantId: string, query: ListEventsQuery) {
+export async function listEvents(db: Database, tenantId: string, query: ListEventsQuery) {
   const rows = await db
     .select()
     .from(notificationEvents)

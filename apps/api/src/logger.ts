@@ -1,15 +1,16 @@
-import type { FastifyBaseLogger } from "fastify";
+import pino from "pino";
 
-const isProduction = process.env["NODE_ENV"] === "production";
+/**
+ * pino's Node transports (worker_threads-based pretty-printing, file destinations) aren't
+ * available in the Workers runtime. `browser.asObject` keeps structured JSON logging — still
+ * pino's API, still one structured line per log — routed through console methods, which
+ * Workers supports natively.
+ */
+export function createLogger(level: string | undefined) {
+  return pino({
+    level: level ?? "info",
+    browser: { asObject: true },
+  });
+}
 
-export const loggerConfig = isProduction
-  ? { level: process.env["LOG_LEVEL"] ?? "info" }
-  : {
-      level: process.env["LOG_LEVEL"] ?? "debug",
-      transport: {
-        target: "pino-pretty",
-        options: { translateTime: "HH:MM:ss", ignore: "pid,hostname" },
-      },
-    };
-
-export type Logger = FastifyBaseLogger;
+export type Logger = ReturnType<typeof createLogger>;

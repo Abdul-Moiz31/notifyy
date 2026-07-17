@@ -1,0 +1,33 @@
+name = "notify-engine-api"
+main = "src/index.ts"
+compatibility_date = "2024-11-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Runs the scheduled job processor once a minute (ADR-014: accepted latency tradeoff).
+[triggers]
+crons = ["* * * * *"]
+
+# Create with: wrangler hyperdrive create notify-engine-db --connection-string="$DATABASE_URL"
+# (use the Supabase session-pooler string, not the direct db.*.supabase.co host)
+#
+# For local `wrangler dev` without a Cloudflare login: copy this file to a gitignored
+# wrangler.local.toml, set localConnectionString below to the real DATABASE_URL, and run
+# `wrangler dev -c wrangler.local.toml`. Never put the real value in this tracked file.
+[[hyperdrive]]
+binding = "HYPERDRIVE"
+id = "REPLACE_WITH_HYPERDRIVE_ID"
+localConnectionString = "postgresql://replace-with-DATABASE_URL-for-local-dev"
+
+[vars]
+SMTP_HOST = "smtp.example.com"
+SMTP_PORT = "587"
+SMTP_SECURE = "false"
+NOTIFY_FROM_EMAIL = "notifications@example.com"
+SUPABASE_URL = "https://your-project-ref.supabase.co"
+SUPABASE_ANON_KEY = "your-supabase-anon-key"
+DASHBOARD_ORIGIN = "https://your-dashboard.pages.dev"
+
+# Secrets (never committed): set with
+#   wrangler secret put SMTP_USER
+#   wrangler secret put SMTP_PASS
+# SMTP_HOST/SMTP_PORT/SMTP_SECURE can be plain [vars] since they aren't sensitive on their own.

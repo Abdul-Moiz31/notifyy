@@ -1,32 +1,32 @@
-import Fastify, { type FastifyInstance } from "fastify";
-import cors from "@fastify/cors";
-import { loggerConfig } from "./logger.js";
-import apiKeyAuthPlugin from "./plugins/api-key-auth.js";
-import supabaseAuthPlugin from "./plugins/supabase-auth.js";
+import { Hono } from "hono";
+import { cors } from "hono/cors";
+import { dbMiddleware } from "./middleware/db.js";
+import { apiKeyAuthMiddleware } from "./middleware/api-key-auth.js";
+import { supabaseAuthMiddleware } from "./middleware/supabase-auth.js";
 import eventsRoutes from "./routes/events.js";
 import dashboardRoutes from "./routes/dashboard.js";
+import type { AppEnv } from "./types.js";
 
-const dashboardOrigins = (process.env["DASHBOARD_ORIGIN"] ?? "http://localhost:3001")
-  .split(",")
-  .map((origin) => origin.trim());
+export function buildApp() {
+  const app = new Hono<AppEnv>();
 
-export function buildApp(): FastifyInstance {
-  const app = Fastify({ logger: loggerConfig });
-
-  app.get("/health", async () => ({ status: "ok" }));
+  app.get("/health", (c) => c.json({ status: "ok" }));
 
   // /v1/events* is server-to-server only (API key), never called from a browser — no CORS needed.
-  app.register(async (instance) => {
-    instance.register(apiKeyAuthPlugin);
-    instance.register(eventsRoutes);
-  });
+  app.use("/v1/events", dbMiddleware, apiKeyAuthMiddleware);
+  app.use("/v1/events/*", dbMiddleware, apiKeyAuthMiddleware);
+  app.route("/", eventsRoutes);
 
   // /v1/dashboard/* is called directly from the dashboard's browser origin, so it needs CORS.
-  app.register(async (instance) => {
-    instance.register(cors, { origin: dashboardOrigins });
-    instance.register(supabaseAuthPlugin);
-    instance.register(dashboardRoutes);
+  const dashboardCors = cors({
+    origin: (origin, c) => {
+      const allowed = c.env.DASHBOARD_ORIGIN.split(",").map((entry: string) => entry.trim());
+      return allowed.includes(origin) ? origin : null;
+    },
   });
+  app.use("/v1/dashboard", dashboardCors, dbMiddleware, supabaseAuthMiddleware);
+  app.use("/v1/dashboard/*", dashboardCors, dbMiddleware, supabaseAuthMiddleware);
+  app.route("/", dashboardRoutes);
 
   return app;
 }
