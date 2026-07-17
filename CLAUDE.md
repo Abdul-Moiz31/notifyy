@@ -5,44 +5,43 @@ Multi-tenant notification infrastructure. Developers integrate via API key to tr
 ## Stack
 
 - Language: TypeScript everywhere, strict mode on
-- Runtime: Node.js 20+
-- API framework: Fastify 5
-- Database: Postgres via Supabase
+- Runtime: Cloudflare Workers (`apps/api`); Node.js 20+ for local scripts/tests only
+- API framework: Hono, runs on Cloudflare Workers (see ADR-012)
+- Database: Postgres via Supabase, reached from the Worker through Cloudflare Hyperdrive (see ADR-013)
 - ORM/query layer: Drizzle ORM + drizzle-kit
 - Validation: Zod
-- Queue (phase 1): Postgres `jobs` table, `SELECT ... FOR UPDATE SKIP LOCKED` — no Redis/broker
-- Email provider: Nodemailer over SMTP (provider-agnostic — not Resend, see ADR-005)
+- Queue (phase 1): Postgres `jobs` table, `SELECT ... FOR UPDATE SKIP LOCKED` — no Redis/broker. Claimed once per minute by a Cron Trigger's `scheduled()` handler in the same Worker, not a standalone polling process (see ADR-014)
+- Email provider: Nodemailer over SMTP (provider-agnostic — not Resend, see ADR-005), running in-Worker via the `nodejs_compat` compatibility flag (see ADR-015)
 - Dashboard: Next.js (App Router), deployed to Cloudflare Pages
 - Auth (dashboard): Supabase Auth
 - Package manager: pnpm workspaces (monorepo)
-- Deployment (API + worker): Docker Compose on Oracle Cloud free-tier VM
+- Deployment (API + job processing): `wrangler deploy` — a single Cloudflare Worker (see ADR-012)
 - Load testing: k6 (not part of phase 1 build)
-- Logging: pino, structured — never `console.log`
+- Logging: pino, structured — never `console.log` (uses pino's `browser.asObject` mode in the Worker, since Node-only transports aren't available there)
 - Linting/formatting: ESLint 9 flat config + typescript-eslint + Prettier (`eslint-config-prettier` kills stylistic conflicts). Dashboard keeps its own Next-managed ESLint config rather than the root one.
 
 ## Folder structure
 
 ```
 apps/
-  api/              Fastify backend
-  worker/           background job processor
+  api/              Hono API + scheduled job processing, one Cloudflare Worker (wrangler.toml)
   dashboard/        Next.js frontend
 packages/
-  db/               Drizzle schema, migrations, DB client, seed script
-  shared/           Zod schemas, constants, status enums, API-key hashing — reused by api and worker
+  db/               Drizzle schema, migrations, DB client (Node singleton + Hyperdrive factory), seed script
+  shared/           Zod schemas, constants, status enums, API-key hashing — reused across apps
   queue/            queue abstraction (Postgres-backed now, swappable later)
 docs/
   phase-1/
     design.md                target architecture, kept in sync with what's actually implemented
     architecture-diagram.md  mermaid diagram
     decisions.md             ADR-style entries, numbered sequentially
-infra/
-  docker-compose.yml, Dockerfile.api, Dockerfile.worker
 load-tests/
   k6-scripts/
 assets/
   logo.svg          README wordmark
 ```
+
+`apps/worker` and `infra/` (Docker Compose) no longer exist — job processing moved into `apps/api`'s `scheduled()` export, and deployment moved to `wrangler deploy` (ADR-012).
 
 ## Non-negotiable practices
 
@@ -53,11 +52,12 @@ assets/
 - Idempotency keys required on any endpoint that creates a notification event; duplicates return **409 Conflict**, not a silent 200/201 replay (see ADR-002) — no exceptions unless a future ADR explicitly changes this.
 - Every meaningful architectural choice gets a short ADR entry in `docs/phase-1/decisions.md`: **Context / Decision / Consequences**, three to five sentences each, numbered `ADR-00N` sequentially. Do this without being asked whenever a non-obvious technical choice is made (e.g. picking one library/pattern over an alternative).
 - No premature abstraction. Build only what the current subphase asks for. Do not add caching, Redis, rate limiting, multi-region, notification templates/preferences, or worker send logic until the phase that calls for it explicitly says so.
-- Input validation and cross-app types (Zod schemas, status enums, API-key hashing) live in `packages/shared` and get imported by both `apps/api` and `apps/worker` — don't duplicate a schema or a hash function in two apps.
+- Input validation and cross-app types (Zod schemas, status enums, API-key hashing) live in `packages/shared` — don't duplicate a schema or a hash function elsewhere.
+- `packages/db` and `packages/queue` export two module surfaces: the root package (`@notify-engine/db`, `@notify-engine/queue`) is Node-only — it loads `.env` and creates a module-level DB singleton, and must never be imported from Worker code. Worker code (`apps/api/src`) imports schema/types from `@notify-engine/db/schema` and `@notify-engine/db/hyperdrive` instead — those subpaths have no side-effecting imports and are safe to bundle for Workers. Node-only scripts, `migrate.ts`/`seed.ts`, and vitest tests use the root package as before.
 
 ## Testing
 
-- Integration tests, not mocked unit tests — hit the real Supabase DB configured in `.env` (see `apps/api/test/events.test.ts` for the pattern: seed throwaway tenants/keys in `beforeAll`, clean them up in `afterAll`, use Fastify's `app.inject()` rather than a bound port).
+- Integration tests, not mocked unit tests — hit the real Supabase DB configured in `.env` (see `apps/api/test/events.test.ts` for the pattern: seed throwaway tenants/keys in `beforeAll`, clean them up in `afterAll`, use Hono's `app.request(path, init, env)` rather than a bound port — `test/test-env.ts` builds the fake `Bindings` object, with `HYPERDRIVE.connectionString` pointed straight at `DATABASE_URL` since vitest runs in plain Node, never inside a Worker).
 - Every subphase that adds an endpoint or a meaningful service function should get integration test coverage for its happy path and its documented failure modes (auth rejection, not-found/cross-tenant, conflict) before being called done.
 - Before considering any change complete: `pnpm -r run typecheck`, `pnpm run lint`, and the relevant `pnpm --filter <pkg> run test` must all pass. For anything with a runtime surface (new endpoint, new script), also actually run it — start the dev server and curl it, or run the script against the real DB — and show the output. Don't claim something works from reading the code alone.
 
@@ -66,6 +66,8 @@ assets/
 - Supabase's **direct** connection host (`db.<ref>.supabase.co`) is IPv6-only and unreachable from many networks/CI. Always use the **session pooler** string (`aws-*.pooler.supabase.com`) for `DATABASE_URL`.
 - `.env` is git-ignored and must never be committed — verify with `git status`/`git check-ignore` before staging when in doubt. `.env.example` holds placeholder shapes only, no real credentials.
 - `packages/db/src/env.ts` loads the repo-root `.env` relative to the compiled/executed file location, so scripts run correctly regardless of the invoking `cwd`. `drizzle.config.ts` loads it separately (drizzle-kit's own loader can't resolve the `.js`-suffixed sibling import), via `resolve(process.cwd(), "../../.env")` — keep that in sync if the config file moves.
+- `apps/api/wrangler.toml` is committed and holds no secrets — real values (Hyperdrive ID, Supabase keys, SMTP creds) are placeholders there. Local secrets/overrides go in `apps/api/.dev.vars` (gitignored) and, for testing against the real Supabase DB without a Cloudflare account, `apps/api/wrangler.local.toml` (gitignored) with a real `localConnectionString` on the `[[hyperdrive]]` block — never put a real connection string or credential in the tracked `wrangler.toml`.
+- Local `wrangler dev` doesn't trigger the Cron Trigger automatically — pass `--test-scheduled` and hit `GET /__scheduled` to run the scheduled handler once.
 
 ## Git conventions
 

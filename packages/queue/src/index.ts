@@ -1,5 +1,6 @@
 import { and, eq, inArray, lte } from "drizzle-orm";
-import { db, jobs, type Database, type Job } from "@notify-engine/db";
+import { jobs, type Job } from "@notify-engine/db/schema";
+import type { Database } from "@notify-engine/db/hyperdrive";
 
 /** Structural subset of Database/transaction that enqueue needs — lets callers pass either the db singleton or a transaction. */
 type Enqueuer = Pick<Database, "insert">;
@@ -68,5 +69,3 @@ export class PgQueue {
     });
   }
 }
-
-export const queue = new PgQueue(db);

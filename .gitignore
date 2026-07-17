@@ -3,9 +3,12 @@ dist/
 build/
 .next/
 *.log
-.env
-.env.local
 .env.*.local
+.dev.vars
+.dev.vars.*
+.wrangler/
+wrangler.local.toml
 .DS_Store
 coverage/
 .turbo/
+config.bat

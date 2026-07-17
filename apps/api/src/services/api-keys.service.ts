@@ -1,7 +1,8 @@
 import { and, eq, isNull } from "drizzle-orm";
-import { db, apiKeys } from "@notify-engine/db";
+import type { Database } from "@notify-engine/db/hyperdrive";
+import { apiKeys } from "@notify-engine/db/schema";
 
-export async function resolveTenantByApiKeyHash(keyHash: string): Promise<string | null> {
+export async function resolveTenantByApiKeyHash(db: Database, keyHash: string): Promise<string | null> {
   const [row] = await db
     .select({ tenantId: apiKeys.tenantId })
     .from(apiKeys)
@@ -11,6 +12,6 @@ export async function resolveTenantByApiKeyHash(keyHash: string): Promise<string
   return row?.tenantId ?? null;
 }
 
-export async function touchApiKeyLastUsed(keyHash: string): Promise<void> {
+export async function touchApiKeyLastUsed(db: Database, keyHash: string): Promise<void> {
   await db.update(apiKeys).set({ lastUsedAt: new Date() }).where(eq(apiKeys.keyHash, keyHash));
 }

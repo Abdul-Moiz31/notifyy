@@ -2,29 +2,24 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { randomUUID } from "node:crypto";
 import { eq, inArray } from "drizzle-orm";
 import type { Transporter } from "nodemailer";
-import pino from "pino";
-import {
-  db,
-  client,
-  tenants,
-  notificationEvents,
-  jobs,
-  deliveries,
-} from "@notify-engine/db";
-import { queue } from "@notify-engine/queue";
-import { createTransporter, smtpConfigFromEnv } from "../src/services/mailer.service.js";
+import { db, client, tenants, notificationEvents, jobs, deliveries } from "@notify-engine/db";
+import { PgQueue } from "@notify-engine/queue";
 import { processJob, MAX_ATTEMPTS } from "../src/services/job-processor.service.js";
-import { pollOnce } from "../src/poll.js";
+import { processDueJobs } from "../src/scheduled/process-due-jobs.js";
+import { createLogger } from "../src/logger.js";
+import { testEnv } from "./test-env.js";
 
-const testLogger = pino({ level: "silent" });
+const env = testEnv();
+const testLogger = createLogger("silent");
+const queue = new PgQueue(db);
 
-describe("worker integration", () => {
+describe("scheduled job processing integration", () => {
   let tenantId: string;
 
   beforeAll(async () => {
     const [tenant] = await db
       .insert(tenants)
-      .values({ name: `Test Worker Tenant ${randomUUID()}` })
+      .values({ name: `Test Jobs Tenant ${randomUUID()}` })
       .returning();
 
     if (!tenant) {
@@ -44,18 +39,17 @@ describe("worker integration", () => {
   });
 
   it("sends a real email through SMTP and marks the event sent with a delivery row", async () => {
-    const fromAddress = process.env["NOTIFY_FROM_EMAIL"];
-    if (!fromAddress) {
-      throw new Error("NOTIFY_FROM_EMAIL must be set for this test");
-    }
-
     const [event] = await db
       .insert(notificationEvents)
       .values({
         tenantId,
         idempotencyKey: `test-${randomUUID()}`,
         eventType: "test.email",
-        payload: { to: fromAddress, subject: "Notify Engine worker test", body: "hello from the worker test" },
+        payload: {
+          to: env.NOTIFY_FROM_EMAIL,
+          subject: "Notify Engine scheduled-handler test",
+          body: "hello from the scheduled handler test",
+        },
       })
       .returning();
 
@@ -65,15 +59,7 @@ describe("worker integration", () => {
 
     await queue.enqueue({ eventId: event.id, tenantId });
 
-    const transporter = createTransporter(smtpConfigFromEnv());
-    const claimedCount = await pollOnce({
-      queue,
-      transporter,
-      fromAddress,
-      logger: testLogger,
-      workerId: "test-worker",
-      batchSize: 10,
-    });
+    const claimedCount = await processDueJobs(db, env, testLogger);
 
     expect(claimedCount).toBeGreaterThanOrEqual(1);
 
@@ -111,6 +97,7 @@ describe("worker integration", () => {
     const fakeTransporter = { sendMail: () => Promise.resolve({ messageId: "unused" }) } as unknown as Transporter;
 
     await processJob(job, {
+      db,
       transporter: fakeTransporter,
       fromAddress: "from@example.com",
       logger: testLogger,
@@ -152,6 +139,7 @@ describe("worker integration", () => {
     } as unknown as Transporter;
 
     await processJob(job, {
+      db,
       transporter: failingTransporter,
       fromAddress: "from@example.com",
       logger: testLogger,
@@ -198,6 +186,7 @@ describe("worker integration", () => {
     } as unknown as Transporter;
 
     await processJob(job, {
+      db,
       transporter: failingTransporter,
       fromAddress: "from@example.com",
       logger: testLogger,
